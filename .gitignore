@@ -1,0 +1,21 @@
+
+# Terraform working directories
+**/.terraform/*
+
+# Terraform state and backups
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Terraform variable files that may contain secrets
+*.tfvars
+*.tfvars.json
+
+# Terraform crash logs
+crash.log
+crash.*.log
+
+# OCI credentials and private keys
+*.pem
+*.key
+.oci/
