@@ -19,3 +19,9 @@ crash.*.log
 *.pem
 *.key
 .oci/
+# JetBrains IDE configuration
+.idea/
+
+# Temporary Terraform plan inspection files
+*.tfplan
+image-check.json
