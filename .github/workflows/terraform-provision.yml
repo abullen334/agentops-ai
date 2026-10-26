@@ -135,6 +135,30 @@ jobs:
 
           echo "$RUNNER_TEMP/oci-cli-venv/bin" >> "$GITHUB_PATH"
 
+      - name: Inspect OCI instance list response
+        if: inputs.test_retry_loop == true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Inspecting OCI instance-list response structure..."
+
+          oci compute instance list \
+            --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
+            --all \
+            --output json > "$RUNNER_TEMP/agentops-oci-debug.json"
+
+          echo "Top-level JSON type:"
+          jq -r 'type' "$RUNNER_TEMP/agentops-oci-debug.json"
+
+          echo "Top-level JSON keys (if object):"
+          jq -r 'if type == "object" then keys[] else "Not an object" end' \
+            "$RUNNER_TEMP/agentops-oci-debug.json"
+
+          echo "Instance-list data type:"
+          jq -r 'if type == "object" then (.data | type) else "N/A" end' \
+            "$RUNNER_TEMP/agentops-oci-debug.json"
+
       - name: Initialize Terraform
         working-directory: infrastructure/terraform
         run: terraform init -input=false
