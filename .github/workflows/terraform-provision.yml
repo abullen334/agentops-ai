@@ -141,30 +141,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Testing OCI Compute API response..."
+          echo "Inspecting OCI CLI output format..."
+
+          oci compute instance list \
+            --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
+            --limit 100 \
+            --output json \
+            > "$RUNNER_TEMP/agentops-compute-output.txt"
+
+          echo "Normal output size:"
+          wc -c < "$RUNNER_TEMP/agentops-compute-output.txt"
+
+          echo "Testing OCI CLI output with debug enabled..."
 
           oci --debug compute instance list \
             --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
             --limit 100 \
             --output json \
-            > "$RUNNER_TEMP/agentops-compute-debug.json" \
-            2> "$RUNNER_TEMP/agentops-compute-debug.log"
+            > "$RUNNER_TEMP/agentops-compute-debug-output.txt" \
+            2> "$RUNNER_TEMP/agentops-compute-debug-stderr.txt"
 
-          echo "Compute response size:"
-          wc -c < "$RUNNER_TEMP/agentops-compute-debug.json"
+          echo "Debug output size:"
+          wc -c < "$RUNNER_TEMP/agentops-compute-debug-output.txt"
 
-          echo "Compute response JSON validity:"
-          if jq -e -s 'length == 1' "$RUNNER_TEMP/agentops-compute-debug.json" > /dev/null; then
-            echo "Valid JSON"
-          else
-            echo "No valid JSON returned"
-          fi
+          echo "First-line classification:"
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo "HTTP status lines:"
-          grep -E 'Response status:|Response status code:|HTTP/[0-9.]+' \
-            "$RUNNER_TEMP/agentops-compute-debug.log" \
-            | sed -E 's/(Authorization|signature|keyId)[^, ]*/[REDACTED]/g' \
-            || true
+          import os
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "agentops-compute-debug-output.txt"
+          content = path.read_text(errors="replace")
+          lines = content.splitlines()
+
+          if not lines:
+              print("Empty output")
+          elif lines[0].startswith("DEBUG:"):
+              print("Output begins with debug logging")
+          elif lines[0].startswith("{"):
+              print("Output begins with JSON object")
+          elif lines[0].startswith("["):
+              print("Output begins with JSON array")
+          else:
+              print("Output begins with another format")
+          PY
 
           echo "Diagnostic complete."
 
