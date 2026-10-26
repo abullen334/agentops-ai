@@ -141,30 +141,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Testing raw OCI instance-list response..."
+          echo "Checking OCI CLI configuration..."
 
-          oci compute instance list \
-            --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
-            --all \
-            --output json > "$RUNNER_TEMP/agentops-oci-raw.json"
+          oci --version
 
-          echo "Raw response size in bytes:"
-          wc -c < "$RUNNER_TEMP/agentops-oci-raw.json"
+          echo "Checking configured CLI options..."
+          if grep -q '^\[OCI_CLI_SETTINGS\]' "$OCI_CLI_CONFIG_FILE"; then
+            echo "OCI_CLI_SETTINGS section exists."
+          else
+            echo "No OCI_CLI_SETTINGS section found."
+          fi
 
-          echo "Raw response is valid JSON:"
-          if jq -e -s 'length == 1' "$RUNNER_TEMP/agentops-oci-raw.json" > /dev/null; then
+          echo "Testing OCI availability-domain API..."
+
+          oci iam availability-domain list \
+            --compartment-id "$OCI_CLI_TENANCY" \
+            --output json > "$RUNNER_TEMP/agentops-ad-debug.json"
+
+          echo "Availability-domain response size:"
+          wc -c < "$RUNNER_TEMP/agentops-ad-debug.json"
+
+          echo "Availability-domain response valid JSON:"
+          if jq -e -s 'length == 1' "$RUNNER_TEMP/agentops-ad-debug.json" > /dev/null; then
             echo "Yes"
-
-            echo "Top-level JSON type:"
-            jq -r 'type' "$RUNNER_TEMP/agentops-oci-raw.json"
-
-            echo "Top-level keys:"
-            jq -r 'if type == "object" then keys[] else "Not an object" end' \
-              "$RUNNER_TEMP/agentops-oci-raw.json"
-
-            echo "Instance count:"
-            jq -r 'if (.data | type) == "array" then (.data | length) else "Unexpected structure" end' \
-              "$RUNNER_TEMP/agentops-oci-raw.json"
           else
             echo "No"
           fi
