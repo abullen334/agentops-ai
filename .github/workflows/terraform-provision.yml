@@ -2,6 +2,48 @@ name: AgentOps AI - OCI Provisioning
 
 on:
   workflow_dispatch:
+    inputs:
+      availability_domain:
+        description: "OCI availability domain to attempt"
+        required: true
+        type: choice
+        default: "0"
+        options:
+          - "0"
+          - "1"
+          - "2"
+
+      max_attempts:
+        description: "Maximum OCI provisioning attempts"
+        required: true
+        type: choice
+        default: "3"
+        options:
+          - "3"
+          - "6"
+          - "9"
+
+      retry_delay_seconds:
+        description: "Seconds to wait between OCI capacity retries"
+        required: true
+        type: choice
+        default: "60"
+        options:
+          - "60"
+          - "120"
+          - "300"
+
+      confirm_provisioning:
+        description: "Confirm OCI VM provisioning"
+        required: true
+        type: boolean
+        default: false
+
+      execute_provisioning:
+        description: "Allow Terraform to create the OCI VM"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,7 +55,18 @@ concurrency:
 jobs:
   provision:
     name: Terraform Provisioning
+    if: inputs.confirm_provisioning == true
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: infrastructure/terraform
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_availability_domain_index: ${{ inputs.availability_domain }}
 
     steps:
       - name: Checkout repository
@@ -54,15 +107,28 @@ jobs:
 
           chmod 600 "$HOME/.oci/config"
 
-          echo "OCI_CONFIG_FILE=$HOME/.oci/config" >> "$GITHUB_ENV"
-          echo "OCI_CLI_CONFIG_FILE=$HOME/.oci/config" >> "$GITHUB_ENV"
-          echo "OCI_CLI_PROFILE=DEFAULT" >> "$GITHUB_ENV"
-          echo "OCI_CLI_AUTH=api_key" >> "$GITHUB_ENV"
-          echo "OCI_CLI_USER=$OCI_USER_OCID" >> "$GITHUB_ENV"
-          echo "OCI_CLI_TENANCY=$OCI_TENANCY_OCID" >> "$GITHUB_ENV"
-          echo "OCI_CLI_FINGERPRINT=$OCI_FINGERPRINT" >> "$GITHUB_ENV"
-          echo "OCI_CLI_REGION=$OCI_REGION" >> "$GITHUB_ENV"
-          echo "OCI_CLI_KEY_FILE=$HOME/.oci/agentops_api_key.pem" >> "$GITHUB_ENV"
+          {
+            echo "OCI_CONFIG_FILE=$HOME/.oci/config"
+            echo "OCI_CLI_CONFIG_FILE=$HOME/.oci/config"
+            echo "OCI_CLI_PROFILE=DEFAULT"
+            echo "OCI_CLI_AUTH=api_key"
+            echo "OCI_CLI_USER=$OCI_USER_OCID"
+            echo "OCI_CLI_TENANCY=$OCI_TENANCY_OCID"
+            echo "OCI_CLI_FINGERPRINT=$OCI_FINGERPRINT"
+            echo "OCI_CLI_REGION=$OCI_REGION"
+            echo "OCI_CLI_KEY_FILE=$HOME/.oci/agentops_api_key.pem"
+          } >> "$GITHUB_ENV"
+
+      - name: Install OCI CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m venv "$RUNNER_TEMP/oci-cli-venv"
+          "$RUNNER_TEMP/oci-cli-venv/bin/pip" install oci-cli
+
+          echo "$RUNNER_TEMP/oci-cli-venv/bin" >> "$GITHUB_PATH"
+
       - name: Initialize Terraform
         working-directory: infrastructure/terraform
         run: terraform init -input=false
@@ -70,3 +136,380 @@ jobs:
       - name: Validate Terraform configuration
         working-directory: infrastructure/terraform
         run: terraform validate
+
+      - name: Check existing VM state
+        id: vm_state
+        working-directory: infrastructure/terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Stop immediately if Terraform state cannot be read.
+          if ! terraform state list > /tmp/agentops-state-list.txt; then
+            echo "ERROR: Unable to read Terraform state. Provisioning stopped."
+            exit 1
+          fi
+
+          if grep -Fxq 'oci_core_instance.agentops' /tmp/agentops-state-list.txt; then
+            echo "An AgentOps AI VM is already tracked in Terraform state."
+            echo "vm_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No AgentOps AI VM is currently tracked in Terraform state."
+            echo "vm_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate Terraform plan
+        if: steps.vm_state.outputs.vm_exists == 'false'
+        working-directory: infrastructure/terraform
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Verify Terraform plan safety
+        if: steps.vm_state.outputs.vm_exists == 'false'
+        working-directory: infrastructure/terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          terraform show -json tfplan | jq -e '
+            [
+              .resource_changes[]?
+              | select(.change.actions != ["no-op"])
+              | {
+                  address: .address,
+                  actions: .change.actions
+                }
+            ] as $changes
+            |
+            (
+              $changes == [
+                {
+                  address: "oci_core_instance.agentops",
+                  actions: ["create"]
+                }
+              ]
+            )
+            or
+            (
+              ($changes | length) == 0
+              and
+              (
+                [
+                  .planned_values.root_module.resources[]?
+                  | select(
+                      .address == "oci_core_instance.agentops"
+                      and .mode == "managed"
+                      and .values.id != null
+                    )
+                ] | length
+              ) == 1
+            )
+          ' > /dev/null
+
+          echo "Safety check passed: VM creation or no infrastructure changes."
+
+      - name: Verify Always Free VM specifications
+        if: steps.vm_state.outputs.vm_exists == 'false'
+        working-directory: infrastructure/terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          terraform show -json tfplan | jq -e '
+            [
+              .resource_changes[]?
+              | select(
+                  .address == "oci_core_instance.agentops"
+                  and .change.actions == ["create"]
+                )
+              | .change.after
+              | select(
+                  .shape == "VM.Standard.A1.Flex"
+                  and .shape_config[0].ocpus == 2
+                  and .shape_config[0].memory_in_gbs == 12
+                  and .source_details[0].boot_volume_size_in_gbs == "50"
+                  and .create_vnic_details[0].assign_public_ip == "true"
+                )
+            ] | length == 1
+          ' > /dev/null && {
+            echo "Approved VM specifications verified."
+            exit 0
+          }
+
+          if terraform show -json tfplan | jq -e '
+            [.resource_changes[]? |
+              select(.change.actions != ["no-op"])
+            ] | length == 0
+          ' > /dev/null; then
+            echo "No changes: existing VM configuration retained."
+            exit 0
+          fi
+
+          echo "VM specifications failed verification."
+          exit 1
+
+      - name: Verify selected availability domain
+        if: steps.vm_state.outputs.vm_exists == 'false'
+        working-directory: infrastructure/terraform
+        shell: bash
+        env:
+          SELECTED_AD: ${{ inputs.availability_domain }}
+        run: |
+          set -euo pipefail
+
+          case "$SELECTED_AD" in
+            0) EXPECTED_AD="yVvY:US-ASHBURN-AD-1" ;;
+            1) EXPECTED_AD="yVvY:US-ASHBURN-AD-2" ;;
+            2) EXPECTED_AD="yVvY:US-ASHBURN-AD-3" ;;
+            *)
+              echo "Invalid availability domain selection."
+              exit 1
+              ;;
+          esac
+
+          terraform show -json tfplan | jq -e --arg ad "$EXPECTED_AD" '
+            (
+              [
+                .resource_changes[]?
+                | select(
+                    .address == "oci_core_instance.agentops"
+                    and .change.actions == ["create"]
+                    and .change.after.availability_domain == $ad
+                  )
+              ] | length
+            ) == 1
+            or
+            (
+              [
+                .resource_changes[]?
+                | select(.change.actions != ["no-op"])
+              ] | length
+            ) == 0
+          ' > /dev/null
+
+          echo "Availability domain verification passed."
+
+      - name: Validate retry configuration
+        shell: bash
+        env:
+          RETRY_DELAY: ${{ inputs.retry_delay_seconds }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        run: |
+          set -euo pipefail
+
+          case "$RETRY_DELAY" in
+            60|120|300) ;;
+            *)
+              echo "Invalid retry delay."
+              exit 1
+              ;;
+          esac
+
+          case "$MAX_ATTEMPTS" in
+            3|6|9) ;;
+            *)
+              echo "Invalid maximum attempt count."
+              exit 1
+              ;;
+          esac
+
+          echo "Retry configuration validated."
+          echo "Delay: ${RETRY_DELAY} seconds"
+          echo "Maximum attempts: ${MAX_ATTEMPTS}"
+
+      - name: Validate starting availability domain
+        shell: bash
+        env:
+          START_AD: ${{ inputs.availability_domain }}
+        run: |
+          set -euo pipefail
+
+          case "$START_AD" in
+            0|1|2)
+              echo "Starting availability domain index: $START_AD"
+              ;;
+            *)
+              echo "ERROR: Invalid availability domain index."
+              exit 1
+              ;;
+          esac
+
+      - name: Verify provisioning mode
+        shell: bash
+        env:
+          EXECUTE_PROVISIONING: ${{ inputs.execute_provisioning }}
+        run: |
+          set -euo pipefail
+
+          case "$EXECUTE_PROVISIONING" in
+            true)
+              echo "Provisioning mode enabled."
+              ;;
+            false)
+              echo "Dry-run mode enabled. No Terraform apply permitted."
+              ;;
+            *)
+              echo "ERROR: Invalid provisioning mode."
+              exit 1
+              ;;
+          esac
+
+      - name: Preview availability domain retry sequence
+        shell: bash
+        env:
+          START_AD: ${{ inputs.availability_domain }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          RETRY_DELAY: ${{ inputs.retry_delay_seconds }}
+        run: |
+          set -euo pipefail
+
+          echo "Planned OCI availability domain sequence:"
+
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+            ad_index=$(( (START_AD + attempt - 1) % 3 ))
+            ad_number=$((ad_index + 1))
+
+            echo "Attempt $attempt: US-ASHBURN-AD-$ad_number"
+          done
+
+          echo "Delay between attempts: ${RETRY_DELAY} seconds"
+          echo "Maximum attempts: ${MAX_ATTEMPTS}"
+
+      - name: Authorize Terraform provisioning
+        id: provisioning_gate
+        if: steps.vm_state.outputs.vm_exists == 'false'
+        shell: bash
+        env:
+          EXECUTE_PROVISIONING: ${{ inputs.execute_provisioning }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EXECUTE_PROVISIONING" == "true" ]]; then
+            echo "Provisioning explicitly authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Dry-run mode. Terraform apply is disabled."
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Initialize provisioning retry loop
+        if: steps.provisioning_gate.outputs.authorized == 'true'
+        working-directory: infrastructure/terraform
+        shell: bash
+        env:
+          START_AD: ${{ inputs.availability_domain }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          RETRY_DELAY: ${{ inputs.retry_delay_seconds }}
+        run: |
+          set -euo pipefail
+
+          echo "Configured attempts: $MAX_ATTEMPTS"
+          echo "Configured retry delay: $RETRY_DELAY seconds"
+          echo "Provisioning execution is currently disabled."
+
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+            ad_index=$(( (START_AD + attempt - 1) % 3 ))
+            ad_number=$((ad_index + 1))
+            export TF_VAR_availability_domain_index="$ad_index"
+
+            echo "Checking Terraform state before attempt $attempt..."
+
+            if ! terraform state list > "$RUNNER_TEMP/agentops-retry-state.txt"; then
+              echo "ERROR: Unable to read Terraform state."
+              exit 1
+            fi
+
+            if grep -Fxq 'oci_core_instance.agentops' "$RUNNER_TEMP/agentops-retry-state.txt"; then
+              echo "AgentOps AI VM already exists in Terraform state."
+              exit 0
+            fi
+
+            echo "Checking OCI for an existing AgentOps AI VM..."
+
+            oci compute instance list \
+              --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
+              --all \
+              --output json > "$RUNNER_TEMP/agentops-oci-instances.json"
+
+            if ! jq -e '.data | type == "array"' \
+              "$RUNNER_TEMP/agentops-oci-instances.json" > /dev/null; then
+              echo "ERROR: Invalid OCI instance-list response."
+              exit 1
+            fi
+
+            if jq -e '
+              any(.data[];
+                .["display-name"] == "agentops-ai"
+                and .["lifecycle-state"] != "TERMINATED"
+              )
+            ' "$RUNNER_TEMP/agentops-oci-instances.json" > /dev/null; then
+              echo "An AgentOps AI VM already exists in OCI."
+              exit 0
+            fi
+
+            echo "Attempt $attempt of $MAX_ATTEMPTS"
+            echo "Availability domain: US-ASHBURN-AD-$ad_number"
+
+            terraform plan -input=false -no-color -out=tfplan
+
+            terraform show -json tfplan > "$RUNNER_TEMP/agentops-retry-plan.json"
+
+            jq -e '
+              [
+                .resource_changes[]?
+                | select(.change.actions != ["no-op"])
+                | {
+                    address: .address,
+                    actions: .change.actions
+                  }
+              ] == [
+                {
+                  address: "oci_core_instance.agentops",
+                  actions: ["create"]
+                }
+              ]
+            ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
+
+            jq -e '
+              [
+                .resource_changes[]?
+                | select(
+                    .address == "oci_core_instance.agentops"
+                    and .change.actions == ["create"]
+                )
+                | .change.after
+                | select(
+                    .shape == "VM.Standard.A1.Flex"
+                    and .shape_config[0].ocpus == 2
+                    and .shape_config[0].memory_in_gbs == 12
+                    and .source_details[0].boot_volume_size_in_gbs == "50"
+                    and .create_vnic_details[0].assign_public_ip == "true"
+                )
+              ] | length == 1
+            ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
+
+            case "$ad_index" in
+              0) EXPECTED_AD="yVvY:US-ASHBURN-AD-1" ;;
+              1) EXPECTED_AD="yVvY:US-ASHBURN-AD-2" ;;
+              2) EXPECTED_AD="yVvY:US-ASHBURN-AD-3" ;;
+              *)
+                echo "ERROR: Invalid availability domain index."
+                exit 1
+                ;;
+            esac
+
+            jq -e --arg ad "$EXPECTED_AD" '
+              [
+                .resource_changes[]?
+                | select(
+                    .address == "oci_core_instance.agentops"
+                    and .change.actions == ["create"]
+                    and .change.after.availability_domain == $ad
+                )
+              ] | length == 1
+            ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
+
+            echo "Terraform plan safety checks passed for $EXPECTED_AD."
+            echo "Stopping after successful plan validation."
+            echo "No Terraform apply command was executed."
+            exit 0
+          done
