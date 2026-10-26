@@ -141,52 +141,121 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Inspecting OCI CLI output format..."
+          COMPARTMENT_ID="ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
+          DIAG_DIR="$RUNNER_TEMP/agentops-oci-diagnostics"
+          mkdir -p "$DIAG_DIR"
 
-          oci compute instance list \
-            --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
+          echo "=== OCI CLI VERSION ==="
+          oci --version
+
+          echo "=== OCI CONFIGURATION CHECK ==="
+          echo "Config file exists: $([[ -f "$OCI_CLI_CONFIG_FILE" ]] && echo yes || echo no)"
+          echo "API key exists: $([[ -f "$OCI_CLI_KEY_FILE" ]] && echo yes || echo no)"
+
+          echo "=== TEST 1: IAM API ==="
+          if oci iam availability-domain list \
+            --compartment-id "$OCI_CLI_TENANCY" \
+            --output json > "$DIAG_DIR/iam.json" 2> "$DIAG_DIR/iam.err"; then
+            echo "Command exit: 0"
+          else
+            echo "Command failed"
+          fi
+
+          echo "IAM bytes: $(wc -c < "$DIAG_DIR/iam.json")"
+
+          echo "=== TEST 2: COMPUTE WITHOUT PAGINATION ==="
+          if oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
             --limit 100 \
-            --output json \
-            > "$RUNNER_TEMP/agentops-compute-output.txt"
+            --output json > "$DIAG_DIR/compute.json" 2> "$DIAG_DIR/compute.err"; then
+            echo "Command exit: 0"
+          else
+            echo "Command failed"
+          fi
 
-          echo "Normal output size:"
-          wc -c < "$RUNNER_TEMP/agentops-compute-output.txt"
+          echo "Compute bytes: $(wc -c < "$DIAG_DIR/compute.json")"
 
-          echo "Testing OCI CLI output with debug enabled..."
-
-          oci --debug compute instance list \
-            --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
+          echo "=== TEST 3: COMPUTE WITH DEBUG ==="
+          if oci --debug compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
             --limit 100 \
-            --output json \
-            > "$RUNNER_TEMP/agentops-compute-debug-output.txt" \
-            2> "$RUNNER_TEMP/agentops-compute-debug-stderr.txt"
+            --output json > "$DIAG_DIR/debug.json" 2> "$DIAG_DIR/debug.err"; then
+            echo "Command exit: 0"
+          else
+            echo "Command failed"
+          fi
 
-          echo "Debug output size:"
-          wc -c < "$RUNNER_TEMP/agentops-compute-debug-output.txt"
+          echo "Debug stdout bytes: $(wc -c < "$DIAG_DIR/debug.json")"
 
-          echo "First-line classification:"
+          echo "=== TEST 4: OUTPUT CLASSIFICATION ==="
           python3 - <<'PY'
+          import json
+          import os
           from pathlib import Path
 
-          import os
+          root = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics"
 
-          path = Path(os.environ["RUNNER_TEMP"]) / "agentops-compute-debug-output.txt"
-          content = path.read_text(errors="replace")
-          lines = content.splitlines()
+          for name in ("iam.json", "compute.json", "debug.json"):
+              path = root / name
+              raw = path.read_bytes()
+              print(f"{name}: {len(raw)} bytes")
 
-          if not lines:
-              print("Empty output")
-          elif lines[0].startswith("DEBUG:"):
-              print("Output begins with debug logging")
-          elif lines[0].startswith("{"):
-              print("Output begins with JSON object")
-          elif lines[0].startswith("["):
-              print("Output begins with JSON array")
-          else:
-              print("Output begins with another format")
+              if not raw.strip():
+                  print("  Format: empty")
+                  continue
+
+              try:
+                  value = json.loads(raw)
+                  print(f"  Format: valid JSON ({type(value).__name__})")
+                  if isinstance(value, dict) and isinstance(value.get("data"), list):
+                      print(f"  Data count: {len(value['data'])}")
+              except (ValueError, UnicodeDecodeError):
+                  print("  Format: non-JSON")
+                  text = raw.decode("utf-8", errors="replace")
+                  first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+                  for label, prefix in (
+                      ("Usage", "usage:"),
+                      ("Error", "error:"),
+                      ("Warning", "warning:"),
+                      ("Debug", "debug:"),
+                      ("Traceback", "traceback"),
+                  ):
+                      print(f"  Starts with {label}: {first.lower().startswith(prefix)}")
+
           PY
 
-          echo "Diagnostic complete."
+          echo "=== TEST 5: HTTP STATUS ==="
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics/debug.err"
+          content = path.read_text(errors="replace")
+          statuses = re.findall(r"Response status:\s*(\d{3})", content)
+          print("HTTP statuses:", ", ".join(statuses) if statuses else "Not found")
+          PY
+
+          echo "=== TEST 6: CLI ERROR CLASSIFICATION ==="
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics"
+          for name in ("iam.err", "compute.err", "debug.err"):
+              text = (root / name).read_text(errors="replace").lower()
+              print(f"{name}:")
+              for label, terms in {
+                  "Authorization failure": ("notauthorized", "not authorized", "401", "403"),
+                  "Rate limiting": ("toomanyrequests", "429"),
+                  "Service error": ("serviceerror", "500", "502", "503"),
+                  "CLI exception": ("traceback", "exception"),
+                  "API key warning": ("oci_api_key",),
+              }.items():
+                  print(f"  {label}: {any(term in text for term in terms)}")
+          PY
+
+          echo "=== DIAGNOSTICS COMPLETE ==="
 
       - name: Initialize Terraform
         working-directory: infrastructure/terraform
