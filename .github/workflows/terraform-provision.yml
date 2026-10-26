@@ -55,7 +55,7 @@ concurrency:
 jobs:
   provision:
     name: Terraform Provisioning
-    if: inputs.confirm_provisioning == true
+    if: inputs.execute_provisioning != true || inputs.confirm_provisioning == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
