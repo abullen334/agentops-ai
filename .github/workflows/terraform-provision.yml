@@ -424,8 +424,9 @@ jobs:
               return 1
             fi
 
-            if grep -Fxq 'oci_core_instance.agentops' "$state_file"; then
-              echo "VM already exists in Terraform state."
+            if [[ -s "$state_file" ]]; then
+              echo "ERROR: Terraform state contains managed resources."
+              echo "Stopping to prevent duplicate or partial provisioning."
               return 10
             fi
 
