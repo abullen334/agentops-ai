@@ -557,10 +557,18 @@ jobs:
             echo "Terraform apply failed. Checking failure category."
 
             if ! grep -Eiq \
-              'Out of host capacity|OutOfHostCapacity|Out of capacity|OutOfCapacity' \
+              'Out of host capacity|OutOfHostCapacity' \
               "$RUNNER_TEMP/agentops-apply.log"; then
-              echo "ERROR: Failure was not a recognized capacity error."
+              echo "ERROR: Failure is not a confirmed OCI host-capacity rejection."
               echo "Stopping without retrying."
+              exit 1
+            fi
+
+            if grep -Eiq \
+              'Error:.*(timeout|connection|unauthorized|forbidden|internal|unknown)|context deadline exceeded|request canceled' \
+              "$RUNNER_TEMP/agentops-apply.log"; then
+              echo "ERROR: Ambiguous or additional failure detected."
+              echo "Automatic retry prohibited."
               exit 1
             fi
 
