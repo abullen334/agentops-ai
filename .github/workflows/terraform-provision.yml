@@ -483,26 +483,47 @@ jobs:
 
             echo "Checking OCI for an existing AgentOps AI VM..."
 
-            oci compute instance list \
-              --compartment-id "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq" \
-              --all \
-              --output json > "$RUNNER_TEMP/agentops-oci-instances.json"
+            "$RUNNER_TEMP/oci-cli-venv/bin/python" - <<'PY'
+          import os
+          import sys
+          import oci
 
-            if ! jq -e '.data | type == "array"' \
-              "$RUNNER_TEMP/agentops-oci-instances.json" > /dev/null; then
-              echo "ERROR: Invalid OCI instance-list response."
-              exit 1
-            fi
+          compartment_id = (
+              "ocid1.compartment.oc1.."
+              "aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
+          )
 
-            if jq -e '
-              any(.data[];
-                .["display-name"] == "agentops-ai"
-                and .["lifecycle-state"] != "TERMINATED"
+          try:
+              config = oci.config.from_file(
+                  file_location=os.environ["OCI_CLI_CONFIG_FILE"],
+                  profile_name=os.environ.get("OCI_CLI_PROFILE", "DEFAULT"),
               )
-            ' "$RUNNER_TEMP/agentops-oci-instances.json" > /dev/null; then
-              echo "An AgentOps AI VM already exists in OCI."
-              exit 0
-            fi
+
+              client = oci.core.ComputeClient(config)
+
+              instances = oci.pagination.list_call_get_all_results(
+                  client.list_instances,
+                  compartment_id=compartment_id,
+              ).data
+
+              matching = [
+                  instance
+                  for instance in instances
+                  if instance.display_name == "agentops-ai"
+                  and instance.lifecycle_state != "TERMINATED"
+              ]
+
+              print(f"OCI instances returned: {len(instances)}")
+              print(f"Existing AgentOps AI instances: {len(matching)}")
+
+              if matching:
+                  print("ERROR: AgentOps AI VM already exists in OCI.")
+                  sys.exit(10)
+
+          except Exception as exc:
+              print(f"ERROR: OCI instance check failed: {type(exc).__name__}")
+              sys.exit(1)
+          PY
 
             echo "Attempt $attempt of $MAX_ATTEMPTS"
             echo "Availability domain: US-ASHBURN-AD-$ad_number"
