@@ -406,32 +406,28 @@ jobs:
           START_AD: ${{ inputs.availability_domain }}
           MAX_ATTEMPTS: ${{ inputs.max_attempts }}
           RETRY_DELAY: ${{ inputs.retry_delay_seconds }}
+          TEST_MODE: ${{ inputs.test_retry_loop }}
+          AUTHORIZED: ${{ steps.provisioning_gate.outputs.authorized }}
         run: |
           set -euo pipefail
 
-          echo "Retry-loop validation mode."
-          echo "Configured attempts: $MAX_ATTEMPTS"
-          echo "Configured retry delay: $RETRY_DELAY seconds"
-          echo "Terraform apply is disabled."
+          if [[ "$TEST_MODE" != "true" && "$AUTHORIZED" != "true" ]]; then
+            echo "ERROR: Provisioning is not authorized."
+            exit 1
+          fi
 
-          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
-            ad_index=$(( (START_AD + attempt - 1) % 3 ))
-            ad_number=$((ad_index + 1))
-            export TF_VAR_availability_domain_index="$ad_index"
+          check_existing_vm() {
+            local state_file="$RUNNER_TEMP/agentops-retry-state.txt"
 
-            echo "Checking Terraform state before attempt $attempt..."
-
-            if ! terraform state list > "$RUNNER_TEMP/agentops-retry-state.txt"; then
+            if ! terraform state list > "$state_file"; then
               echo "ERROR: Unable to read Terraform state."
-              exit 1
+              return 1
             fi
 
-            if grep -Fxq 'oci_core_instance.agentops' "$RUNNER_TEMP/agentops-retry-state.txt"; then
-              echo "AgentOps AI VM already exists in Terraform state."
-              exit 0
+            if grep -Fxq 'oci_core_instance.agentops' "$state_file"; then
+              echo "VM already exists in Terraform state."
+              return 10
             fi
-
-            echo "Checking OCI for an existing AgentOps AI VM..."
 
             "$RUNNER_TEMP/oci-cli-venv/bin/python" - <<'PY'
           import os
@@ -448,105 +444,145 @@ jobs:
                   file_location=os.environ["OCI_CLI_CONFIG_FILE"],
                   profile_name=os.environ.get("OCI_CLI_PROFILE", "DEFAULT"),
               )
-
               client = oci.core.ComputeClient(config)
-
               instances = oci.pagination.list_call_get_all_results(
                   client.list_instances,
                   compartment_id=compartment_id,
               ).data
 
-              matching = [
-                  instance
-                  for instance in instances
+              matches = [
+                  instance for instance in instances
                   if instance.display_name == "agentops-ai"
                   and instance.lifecycle_state != "TERMINATED"
               ]
 
-              print(f"OCI instances returned: {len(instances)}")
-              print(f"Existing AgentOps AI instances: {len(matching)}")
+              print(f"Existing AgentOps AI instances: {len(matches)}")
 
-              if matching:
-                  print("ERROR: AgentOps AI VM already exists in OCI.")
+              if matches:
                   sys.exit(10)
 
           except Exception as exc:
-              print(f"ERROR: OCI instance check failed: {type(exc).__name__}")
+              print(f"ERROR: OCI check failed: {type(exc).__name__}")
               sys.exit(1)
           PY
+          }
 
-            echo "Attempt $attempt of $MAX_ATTEMPTS"
-            echo "Availability domain: US-ASHBURN-AD-$ad_number"
+          echo "Test mode: $TEST_MODE"
+          echo "Maximum attempts: $MAX_ATTEMPTS"
+          echo "Retry delay: $RETRY_DELAY seconds"
+
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+            ad_index=$(( (START_AD + attempt - 1) % 3 ))
+            export TF_VAR_availability_domain_index="$ad_index"
+
+            case "$ad_index" in
+              0) EXPECTED_AD="yVvY:US-ASHBURN-AD-1" ;;
+              1) EXPECTED_AD="yVvY:US-ASHBURN-AD-2" ;;
+              2) EXPECTED_AD="yVvY:US-ASHBURN-AD-3" ;;
+              *) echo "ERROR: Invalid availability domain."; exit 1 ;;
+            esac
+
+            echo "Attempt $attempt of $MAX_ATTEMPTS: $EXPECTED_AD"
+
+            if check_existing_vm; then
+              echo "No existing VM detected."
+            else
+              status=$?
+              if [[ "$status" -eq 10 ]]; then
+                echo "Existing VM detected. Stopping safely."
+                if [[ "$attempt" -eq 1 ]]; then
+                  exit 0
+                fi
+                echo "ERROR: A VM appeared after a previous attempt. Review Terraform state before continuing."
+              fi
+              exit 1
+            fi
+
+            rm -f tfplan
 
             terraform plan -input=false -no-color -out=tfplan
             terraform show -json tfplan > "$RUNNER_TEMP/agentops-retry-plan.json"
 
-            jq -e '
+            jq -e --arg ad "$EXPECTED_AD" '
               [
                 .resource_changes[]?
                 | select(.change.actions != ["no-op"])
-                | {
-                    address: .address,
-                    actions: .change.actions
-                  }
+                | {address: .address, actions: .change.actions}
               ] == [
                 {
                   address: "oci_core_instance.agentops",
                   actions: ["create"]
                 }
               ]
+              and
+              (
+                [
+                  .resource_changes[]?
+                  | select(
+                      .address == "oci_core_instance.agentops"
+                      and .change.actions == ["create"]
+                      and .change.after.availability_domain == $ad
+                      and .change.after.shape == "VM.Standard.A1.Flex"
+                      and .change.after.shape_config[0].ocpus == 2
+                      and .change.after.shape_config[0].memory_in_gbs == 12
+                      and .change.after.source_details[0].boot_volume_size_in_gbs == "50"
+                      and .change.after.create_vnic_details[0].assign_public_ip == "true"
+                    )
+                ] | length
+              ) == 1
             ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
 
-            jq -e '
-              [
-                .resource_changes[]?
-                | select(
-                    .address == "oci_core_instance.agentops"
-                    and .change.actions == ["create"]
-                )
-                | .change.after
-                | select(
-                    .shape == "VM.Standard.A1.Flex"
-                    and .shape_config[0].ocpus == 2
-                    and .shape_config[0].memory_in_gbs == 12
-                    and .source_details[0].boot_volume_size_in_gbs == "50"
-                    and .create_vnic_details[0].assign_public_ip == "true"
-                )
-              ] | length == 1
-            ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
+            echo "Terraform plan safety checks passed."
 
-            case "$ad_index" in
-              0) EXPECTED_AD="yVvY:US-ASHBURN-AD-1" ;;
-              1) EXPECTED_AD="yVvY:US-ASHBURN-AD-2" ;;
-              2) EXPECTED_AD="yVvY:US-ASHBURN-AD-3" ;;
-              *)
-                echo "ERROR: Invalid availability domain index."
-                exit 1
-                ;;
-            esac
-
-            jq -e --arg ad "$EXPECTED_AD" '
-              [
-                .resource_changes[]?
-                | select(
-                    .address == "oci_core_instance.agentops"
-                    and .change.actions == ["create"]
-                    and .change.after.availability_domain == $ad
-                )
-              ] | length == 1
-            ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
-
-            echo "Terraform plan safety checks passed for $EXPECTED_AD."
-
-            if [[ "${{ inputs.test_retry_loop }}" == "true" ]]; then
-              echo "Test mode: continuing to validate the next availability domain."
+            if [[ "$TEST_MODE" == "true" ]]; then
+              echo "Test mode: skipping Terraform apply."
               continue
             fi
 
-            echo "Provisioning is not yet implemented."
-            echo "No Terraform apply command was executed."
-            exit 0
+            if [[ "$AUTHORIZED" != "true" ]]; then
+              echo "ERROR: Terraform apply authorization missing."
+              exit 1
+            fi
+
+            echo "Applying approved Terraform plan..."
+
+            if terraform apply -input=false -no-color tfplan \
+              > "$RUNNER_TEMP/agentops-apply.log" 2>&1; then
+              echo "Terraform apply completed successfully."
+              cat "$RUNNER_TEMP/agentops-apply.log"
+              exit 0
+            fi
+
+            echo "Terraform apply failed. Checking failure category."
+
+            if ! grep -Eiq \
+              'Out of host capacity|OutOfHostCapacity|Out of capacity|OutOfCapacity' \
+              "$RUNNER_TEMP/agentops-apply.log"; then
+              echo "ERROR: Failure was not a recognized capacity error."
+              echo "Stopping without retrying."
+              exit 1
+            fi
+
+            echo "Recognized OCI capacity failure."
+
+            if check_existing_vm; then
+              echo "No existing VM detected after capacity failure."
+            else
+              echo "ERROR: Cannot safely retry after failed apply."
+              echo "Inspect OCI and Terraform state before continuing."
+              exit 1
+            fi
+
+            if [[ "$attempt" -lt "$MAX_ATTEMPTS" ]]; then
+              echo "Waiting $RETRY_DELAY seconds before next availability domain."
+              sleep "$RETRY_DELAY"
+            fi
           done
 
-          echo "All $MAX_ATTEMPTS availability-domain plan checks passed."
-          echo "No Terraform apply command was executed."
+          if [[ "$TEST_MODE" == "true" ]]; then
+            echo "All $MAX_ATTEMPTS availability-domain plans validated."
+            echo "No Terraform apply command was executed."
+          else
+            echo "All $MAX_ATTEMPTS provisioning attempts exhausted."
+            exit 1
+          fi
