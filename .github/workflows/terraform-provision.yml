@@ -386,14 +386,15 @@ jobs:
         shell: bash
         env:
           EXECUTE_PROVISIONING: ${{ inputs.execute_provisioning }}
+          CONFIRM_PROVISIONING: ${{ inputs.confirm_provisioning }}
         run: |
           set -euo pipefail
 
-          if [[ "$EXECUTE_PROVISIONING" == "true" ]]; then
-            echo "Provisioning explicitly authorized."
+          if [[ "$EXECUTE_PROVISIONING" == "true" && "$CONFIRM_PROVISIONING" == "true" ]]; then
+            echo "Provisioning explicitly authorized and confirmed."
             echo "authorized=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Dry-run mode. Terraform apply is disabled."
+            echo "Provisioning not authorized. Terraform apply is disabled."
             echo "authorized=false" >> "$GITHUB_OUTPUT"
           fi
 
