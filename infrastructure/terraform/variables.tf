@@ -15,6 +15,11 @@ variable "compartment_id" {
   type        = string
 
   default = "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
+
+  validation {
+    condition     = var.compartment_id == "ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
+    error_message = "Only the approved AgentOps AI compartment is permitted."
+  }
 }
 
 variable "subnet_id" {
@@ -22,12 +27,22 @@ variable "subnet_id" {
   type        = string
 
   default = "ocid1.subnet.oc1.iad.aaaaaaaaigsbyivzxso43aerv32r7cfpyky6rsbepwkwjm52tpbdmyae777a"
+
+  validation {
+    condition     = var.subnet_id == "ocid1.subnet.oc1.iad.aaaaaaaaigsbyivzxso43aerv32r7cfpyky6rsbepwkwjm52tpbdmyae777a"
+    error_message = "Only the approved AgentOps AI subnet is permitted."
+  }
 }
 
 variable "instance_name" {
   description = "Name of the AgentOps AI compute instance"
   type        = string
   default     = "agentops-ai"
+
+  validation {
+    condition     = var.instance_name == "agentops-ai"
+    error_message = "Only the approved AgentOps AI instance name is permitted."
+  }
 }
 
 variable "instance_shape" {
@@ -73,6 +88,7 @@ variable "boot_volume_gb" {
     error_message = "AgentOps AI is restricted to a 50 GB boot volume."
   }
 }
+
 variable "availability_domain_index" {
   description = "OCI availability domain index (0, 1, or 2)"
   type        = number
