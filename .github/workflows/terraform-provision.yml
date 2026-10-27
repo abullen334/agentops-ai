@@ -537,7 +537,16 @@ jobs:
             ' "$RUNNER_TEMP/agentops-retry-plan.json" > /dev/null
 
             echo "Terraform plan safety checks passed for $EXPECTED_AD."
-            echo "Retry-loop validation completed successfully."
+
+            if [[ "${{ inputs.test_retry_loop }}" == "true" ]]; then
+              echo "Test mode: continuing to validate the next availability domain."
+              continue
+            fi
+
+            echo "Provisioning is not yet implemented."
             echo "No Terraform apply command was executed."
             exit 0
           done
+
+          echo "All $MAX_ATTEMPTS availability-domain plan checks passed."
+          echo "No Terraform apply command was executed."
