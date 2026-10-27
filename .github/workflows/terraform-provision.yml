@@ -141,121 +141,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          COMPARTMENT_ID="ocid1.compartment.oc1..aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
-          DIAG_DIR="$RUNNER_TEMP/agentops-oci-diagnostics"
-          mkdir -p "$DIAG_DIR"
+          echo "Testing OCI Python SDK..."
 
-          echo "=== OCI CLI VERSION ==="
-          oci --version
-
-          echo "=== OCI CONFIGURATION CHECK ==="
-          echo "Config file exists: $([[ -f "$OCI_CLI_CONFIG_FILE" ]] && echo yes || echo no)"
-          echo "API key exists: $([[ -f "$OCI_CLI_KEY_FILE" ]] && echo yes || echo no)"
-
-          echo "=== TEST 1: IAM API ==="
-          if oci iam availability-domain list \
-            --compartment-id "$OCI_CLI_TENANCY" \
-            --output json > "$DIAG_DIR/iam.json" 2> "$DIAG_DIR/iam.err"; then
-            echo "Command exit: 0"
-          else
-            echo "Command failed"
-          fi
-
-          echo "IAM bytes: $(wc -c < "$DIAG_DIR/iam.json")"
-
-          echo "=== TEST 2: COMPUTE WITHOUT PAGINATION ==="
-          if oci compute instance list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --limit 100 \
-            --output json > "$DIAG_DIR/compute.json" 2> "$DIAG_DIR/compute.err"; then
-            echo "Command exit: 0"
-          else
-            echo "Command failed"
-          fi
-
-          echo "Compute bytes: $(wc -c < "$DIAG_DIR/compute.json")"
-
-          echo "=== TEST 3: COMPUTE WITH DEBUG ==="
-          if oci --debug compute instance list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --limit 100 \
-            --output json > "$DIAG_DIR/debug.json" 2> "$DIAG_DIR/debug.err"; then
-            echo "Command exit: 0"
-          else
-            echo "Command failed"
-          fi
-
-          echo "Debug stdout bytes: $(wc -c < "$DIAG_DIR/debug.json")"
-
-          echo "=== TEST 4: OUTPUT CLASSIFICATION ==="
-          python3 - <<'PY'
-          import json
+          "$RUNNER_TEMP/oci-cli-venv/bin/python" - <<'PY'
+          import oci
           import os
-          from pathlib import Path
 
-          root = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics"
+          compartment_id = (
+              "ocid1.compartment.oc1.."
+              "aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
+          )
 
-          for name in ("iam.json", "compute.json", "debug.json"):
-              path = root / name
-              raw = path.read_bytes()
-              print(f"{name}: {len(raw)} bytes")
+          config = oci.config.from_file(
+              file_location=os.environ["OCI_CLI_CONFIG_FILE"],
+              profile_name=os.environ.get("OCI_CLI_PROFILE", "DEFAULT"),
+          )
 
-              if not raw.strip():
-                  print("  Format: empty")
-                  continue
+          client = oci.core.ComputeClient(config)
 
-              try:
-                  value = json.loads(raw)
-                  print(f"  Format: valid JSON ({type(value).__name__})")
-                  if isinstance(value, dict) and isinstance(value.get("data"), list):
-                      print(f"  Data count: {len(value['data'])}")
-              except (ValueError, UnicodeDecodeError):
-                  print("  Format: non-JSON")
-                  text = raw.decode("utf-8", errors="replace")
-                  first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-                  for label, prefix in (
-                      ("Usage", "usage:"),
-                      ("Error", "error:"),
-                      ("Warning", "warning:"),
-                      ("Debug", "debug:"),
-                      ("Traceback", "traceback"),
-                  ):
-                      print(f"  Starts with {label}: {first.lower().startswith(prefix)}")
+          print("OCI SDK initialized.")
 
+          instances = oci.pagination.list_call_get_all_results(
+              client.list_instances,
+              compartment_id=compartment_id,
+          ).data
+
+          print("Compute API response: successful")
+          print(f"Total instances returned: {len(instances)}")
+
+          matching = [
+              instance
+              for instance in instances
+              if instance.display_name == "agentops-ai"
+              and instance.lifecycle_state != "TERMINATED"
+          ]
+
+          print(f"Active AgentOps AI instances found: {len(matching)}")
+
+          if matching:
+              print("Existing AgentOps AI VM detected.")
+          else:
+              print("No existing AgentOps AI VM detected in this compartment.")
+
+          print("OCI SDK diagnostic completed.")
           PY
-
-          echo "=== TEST 5: HTTP STATUS ==="
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics/debug.err"
-          content = path.read_text(errors="replace")
-          statuses = re.findall(r"Response status:\s*(\d{3})", content)
-          print("HTTP statuses:", ", ".join(statuses) if statuses else "Not found")
-          PY
-
-          echo "=== TEST 6: CLI ERROR CLASSIFICATION ==="
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "agentops-oci-diagnostics"
-          for name in ("iam.err", "compute.err", "debug.err"):
-              text = (root / name).read_text(errors="replace").lower()
-              print(f"{name}:")
-              for label, terms in {
-                  "Authorization failure": ("notauthorized", "not authorized", "401", "403"),
-                  "Rate limiting": ("toomanyrequests", "429"),
-                  "Service error": ("serviceerror", "500", "502", "503"),
-                  "CLI exception": ("traceback", "exception"),
-                  "API key warning": ("oci_api_key",),
-              }.items():
-                  print(f"  {label}: {any(term in text for term in terms)}")
-          PY
-
-          echo "=== DIAGNOSTICS COMPLETE ==="
 
       - name: Initialize Terraform
         working-directory: infrastructure/terraform
