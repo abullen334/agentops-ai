@@ -135,57 +135,6 @@ jobs:
 
           echo "$RUNNER_TEMP/oci-cli-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Inspect OCI instance list response
-        if: inputs.test_retry_loop == true
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Testing OCI Python SDK..."
-
-          "$RUNNER_TEMP/oci-cli-venv/bin/python" - <<'PY'
-          import oci
-          import os
-
-          compartment_id = (
-              "ocid1.compartment.oc1.."
-              "aaaaaaaawv5hkgwxbpwsefyyyojdfaxjgjk6a4l7bcrwbgclfcoq2czecheq"
-          )
-
-          config = oci.config.from_file(
-              file_location=os.environ["OCI_CLI_CONFIG_FILE"],
-              profile_name=os.environ.get("OCI_CLI_PROFILE", "DEFAULT"),
-          )
-
-          client = oci.core.ComputeClient(config)
-
-          print("OCI SDK initialized.")
-
-          instances = oci.pagination.list_call_get_all_results(
-              client.list_instances,
-              compartment_id=compartment_id,
-          ).data
-
-          print("Compute API response: successful")
-          print(f"Total instances returned: {len(instances)}")
-
-          matching = [
-              instance
-              for instance in instances
-              if instance.display_name == "agentops-ai"
-              and instance.lifecycle_state != "TERMINATED"
-          ]
-
-          print(f"Active AgentOps AI instances found: {len(matching)}")
-
-          if matching:
-              print("Existing AgentOps AI VM detected.")
-          else:
-              print("No existing AgentOps AI VM detected in this compartment.")
-
-          print("OCI SDK diagnostic completed.")
-          PY
-
       - name: Initialize Terraform
         working-directory: infrastructure/terraform
         run: terraform init -input=false
