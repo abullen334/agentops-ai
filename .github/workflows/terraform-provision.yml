@@ -556,6 +556,15 @@ jobs:
 
             echo "Terraform apply failed. Checking failure category."
 
+            echo "=== Terraform apply error summary ==="
+
+            grep -E -A 12 \
+              'Error:|ServiceError:|Out of host capacity|OutOfHostCapacity' \
+              "$RUNNER_TEMP/agentops-apply.log" \
+              | tail -n 60 || true
+
+            echo "=== End error summary ==="
+
             if ! grep -Eiq \
               'Out of host capacity|OutOfHostCapacity' \
               "$RUNNER_TEMP/agentops-apply.log"; then
