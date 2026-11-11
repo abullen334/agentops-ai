@@ -1,0 +1,43 @@
+name: CloudLaunch - Terraform Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infrastructure/aws/**"
+      - ".github/workflows/cloudlaunch-validate.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-cloudlaunch-demo:
+    name: Validate CloudLaunch Demo (dev)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run: 
+        working-directory: infrastructure/aws/workloads/cloudlaunch-demo/dev
+
+    steps:
+      - name: Check repository
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.17.0"
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -diff
+
+      - name: Initialize Terraform
+        run: terraform init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate Terraform
+        run: terraform validate -no-color
+
+      
