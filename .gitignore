@@ -1,4 +1,3 @@
-
 # Terraform working directories
 **/.terraform/*
 
@@ -25,3 +24,12 @@ crash.*.log
 # Temporary Terraform plan inspection files
 *.tfplan
 image-check.json
+
+# macOS metadata
+.DS_Store
+
+# Terraform plan files
+tfplan
+
+# Local AWS CLI configuration
+.aws/
